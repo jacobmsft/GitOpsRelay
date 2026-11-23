@@ -84,17 +84,19 @@ Every event—whether delivered by a GitHub App, an Azure DevOps Service Hook, o
   - `io.gitopsrelay.git.tag.created` / `io.gitopsrelay.git.tag.deleted`
   - `io.gitopsrelay.git.pr.opened` / `io.gitopsrelay.git.pr.updated` / `io.gitopsrelay.git.pr.merged` / `io.gitopsrelay.git.pr.closed`
 - **Key Payload Fields (`data`):**
-  - `repository`: `{ provider: "github" | "azdo" | "git", host, owner, project?, name, cloneUrl, defaultBranch, canonicalId }`
+  - `repository`: `{ provider: "github" | "azdo" | "git", host, owner, project?, name, cloneUrl (userinfo-stripped), defaultBranch, canonicalId (lowercase host/path NFC) }`
   - `ingestion`: `{ mode: "webhook" | "poll", observedAt, rawDeliveryId? }`
-  - `change`: `{ ref, refType: "branch" | "tag", beforeSha, afterSha, isForcePush, changedPaths?: string[], actor? }`
+  - `change`: `{ ref, refType: "branch" | "tag", beforeSha, afterSha, isForcePush?: boolean | null, changedPaths?: string[], actor? }`
   - `pullRequest?`: `{ id, number, title, status, isDraft, sourceRef, targetRef, headSha, mergeCommitSha? }`
+- **CloudEvents Extensibility:** Sets `subject` to the normalized ref/PR identifier and permits standard CloudEvents extension attributes (such as OpenTelemetry `traceparent` and `dataschema`).
 
 ### 3.2 Webhook-to-Polling Parity & Deduplication Engine
 
 Simulating identical signals when an app cannot be installed requires a **two-tier poller** backed by a persistent **Ref Snapshot & Watermark Store**:
 
 1. **Tier 1 — Zero-API-Quota Ref Poller (`git ls-remote` over Smart HTTP / SSH):**
-   - Queries ref advertisements (`refs/heads/*`, `refs/tags/*`) without cloning the repo and **without burning GitHub/ADO REST API rate limits**.
+   - Queries ref advertisements (`refs/heads/*`, `refs/tags/*`) without cloning the repo and **without burning GitHub/ADO REST API rate limits**, ignoring peeled annotated-tag dereference entries (`refs/tags/*^{}`) so unpeeled tag OIDs match webhooks.
+   - Normalizes all-zero 40/64-char webhook OIDs (`0000...`) to `null` so webhook and poll transitions classify identically, and supports **silent initial baseline seeding** when a repository is first registered (avoiding thousands of synthetic `created` signals on existing tags/branches).
    - Diffs against the stored `(repo_id, ref_name) -> sha` map:
      - `null -> sha` emits `git.branch.created` (or `git.tag.created`) + `git.push`.
      - `old_sha -> new_sha` emits `git.push` with exact `beforeSha` and `afterSha`.
@@ -103,22 +105,23 @@ Simulating identical signals when an app cannot be installed requires a **two-ti
 2. **Tier 2 — Conditional PR Metadata Poller (GitHub & ADO REST):**
    - Git refs alone don't carry PR state (draft, opened, merged vs. direct push).
    - Uses `If-None-Match` (ETag) on GitHub (`304 Not Modified` costs **0 rate-limit points**) and continuation/updated-after watermarks on ADO to synthesize `git.pr.*` signals with full parity.
-3. **Deterministic Idempotency & Hybrid Mode:**
-   - Every transition computes an idempotency key: `sha256(canonical_repo_id + event_type + ref + before_sha + after_sha)`.
-   - **Bonus superpower ("Hybrid Mode"):** Even on repos *with* a GitHub/ADO App installed, running a slow background poll (e.g., every 15m) acts as a self-healing audit loop—if a webhook dropped during an SCM outage, the poller catches up and emits the missing signal without duplicating already-processed webhooks.
+3. **Compare-and-Swap Ref Snapshots, Short-Window Dedup & Hybrid Mode:**
+   - **CAS Snapshot as Primary Truth:** Both webhook handlers and poll cycles advance per-ref state via optimistic concurrency (`ETag` / version token), and only commit watermarks/dedup entries **after** queue publish succeeds (reserve/commit/abandon) so crashes never drop signals.
+   - **ABA-Safe Short Dedup Window:** Deterministic transition keys (`v1` length-prefixed hash over canonical repo ID, event type, ref, `beforeSha`, `afterSha`) use a short broker/store dedup window (~poll interval rather than multi-day retention) so legitimate rollback + roll-forward (`A→B→A→B`) transitions are never suppressed.
+   - **Bonus superpower ("Hybrid Mode"):** Even on repos *with* a GitHub/ADO App installed, running a slow background poll (e.g., every 15m) against the shared CAS ref snapshot acts as a self-healing audit loop—catching up any dropped webhooks without spurious `A→C` duplicates.
 
 ### 3.3 Pluggable Queue Abstraction Layer (`ISignalQueuePublisher` & `ISignalQueueConsumer`)
 
 Rather than locking workloads into a proprietary broker, `GitOpsRelay` separates **signal normalization** from **queue transport** behind clean provider interfaces:
 
 - **`ISignalQueuePublisher` (Emission Side):**
-  - Emits canonical CloudEvents 1.0 `GitSignal` payloads (plus promoted metadata attributes: `provider`, `repo`, `eventType`, `ref`, `idempotencyKey`) to one or more configured queue backends:
-    1. **Azure Service Bus (`GitOpsRelay.Queues.AzureServiceBus`):** Publishes to a Queue or Topic; promotes CloudEvents attributes to Service Bus `ApplicationProperties` so workloads can use native Service Bus Topic Subscription SQL/Correlation filters, Dead-Letter Queues, and Session/MessageId deduplication.
-    2. **Azure Storage Queues (`GitOpsRelay.Queues.AzureStorageQueues`):** Ultra-low-cost, zero-idle-cost queue emission; supports topic/route fan-out by mapping logical channels/subscriptions to named Storage Queues.
+  - Emits canonical CloudEvents 1.0 `GitSignal` payloads (`application/cloudevents+json`, batch-capable, with ordering/partition key `canonicalId + ref`, routing target, and promoted metadata attributes `provider`, `repo`, `eventType`, `ref`, `idempotencyKey`) to one or more configured queue backends:
+    1. **Azure Service Bus (`GitOpsRelay.Queues.AzureServiceBus`):** Publishes to a Queue or Topic; promotes CloudEvents attributes to Service Bus `ApplicationProperties` so workloads can use native Service Bus Topic Subscription SQL/Correlation filters, Dead-Letter Queues, Session ordering, and short-window `MessageId` deduplication.
+    2. **Azure Storage Queues (`GitOpsRelay.Queues.AzureStorageQueues`):** Ultra-low-cost, zero-idle-cost queue emission; supports topic/route fan-out by mapping logical channels/subscriptions to named Storage Queues (with claim-check pointer support if `changedPaths` exceeds 64 KB).
     3. **Embedded SQLite / HTTP+gRPC Pull Queue (`GitOpsRelay.Queues.Sqlite`):** Zero-cloud-dependency local/self-hosted queue with built-in `/v1/subscriptions/{name}/lease` endpoints for local dev or non-Azure environments.
-    4. **Extensible Community Providers:** NATS JetStream, PostgreSQL, RabbitMQ, or AWS SQS via the same 2-method `ISignalQueuePublisher` contract.
+    4. **Extensible Community Providers:** NATS JetStream, PostgreSQL, RabbitMQ, or AWS SQS via the same `ISignalQueuePublisher` contract.
 - **Dual Consumption Model (BYO Compute):**
-  - **Via `GitOpsRelay.Client` SDK (`ISignalQueueConsumer`):** Portable .NET Worker SDK (`AddGitOpsRelayConsumer`) that abstracts lease/ack/nack across Azure Service Bus, Azure Storage Queues, or the built-in HTTP/gRPC endpoint so workload code stays 100% cloud-agnostic.
+  - **Via `GitOpsRelay.Client` SDK (`ISignalQueueConsumer`):** Portable .NET Worker SDK (`AddGitOpsRelayConsumer`) supporting lease renewal, explicit `Complete`/`Abandon` (with retry delay)/`DeadLetter`, delivery count inspection, and poison-message isolation across Azure Service Bus, Azure Storage Queues, or the built-in HTTP/gRPC endpoint.
   - **Direct Native Platform Consumption:** Because every emitted message is standard CloudEvents 1.0 JSON, workloads can also trigger directly via **Azure Container Apps KEDA scalers**, **Azure Functions Queue/ServiceBus triggers**, Logic Apps, or any language's native Azure SDK without needing a special client.
 
 ### 3.4 Cloud-Native Hosting: Azure App Service & Azure Container Apps
