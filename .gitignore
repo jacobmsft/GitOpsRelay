@@ -1,0 +1,21 @@
+## Build output
+**/bin/
+**/obj/
+**/TestResults/
+.vs/
+
+## IDE
+.idea/
+*.user
+*.suo
+
+## Local secrets and environment
+.env
+.env.*
+!.env.example
+appsettings.Local.json
+# appsettings.Development.json is intentionally committable.
+
+## OS
+.DS_Store
+Thumbs.db
