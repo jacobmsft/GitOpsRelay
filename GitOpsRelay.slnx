@@ -1,0 +1,19 @@
+<Solution>
+  <Folder Name="/docs/">
+    <Folder Name="/docs/adr/">
+      <File Path="docs/adr/0001-layered-signal-bus-and-opengitops.md" />
+      <File Path="docs/adr/0002-webhook-polling-unification.md" />
+      <File Path="docs/adr/0003-pluggable-queues-and-azure-hosting.md" />
+    </Folder>
+    <Folder Name="/docs/schema/">
+      <File Path="docs/schema/gitsignal.cloudevents.schema.json" />
+    </Folder>
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/GitOpsRelay.Contracts/GitOpsRelay.Contracts.csproj" />
+    <Project Path="src/GitOpsRelay.Core/GitOpsRelay.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/GitOpsRelay.Core.Tests/GitOpsRelay.Core.Tests.csproj" />
+  </Folder>
+</Solution>

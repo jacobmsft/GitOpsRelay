@@ -208,7 +208,7 @@ GitOpsRelay/
 ### Phase 0 — Repository Bootstrap, Spec & Queue/State Abstractions (`v0.1.0-alpha`)
 - Create `jacobmsft/GitOpsRelay` with MIT `LICENSE`, `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and GitHub Actions CI.
 - Publish canonical `GitSignal` JSON Schema (CloudEvents 1.0) and ADRs (including ADR-0003 for pluggable Queue/State abstractions and App Service / Container Apps hosting).
-- Scaffold `GitOpsRelay.slnx`, central package management, `GitOpsRelay.Contracts`, and `GitOpsRelay.Core` (`ISignalQueuePublisher`, `ISignalQueueConsumer`, `IRefSnapshotStore`, `IDistributedPollLock`, ref-diff engine, and idempotency parity tests).
+- Scaffold `GitOpsRelay.slnx`, central package management, `GitOpsRelay.Contracts`, and `GitOpsRelay.Core` (`ISignalQueuePublisher`, `ISignalQueueConsumer`, `IRefSnapshotStore`, `IDistributedPollLeaseProvider`, ref-diff engine, and idempotency parity tests).
 
 ### Phase 1 — Walking Skeleton: GitHub + Poller + Azure Queue / Service Bus + Local SQLite (`v0.2.0`)
 - Implement GitHub App webhook ingestion (`push`, `create`, `delete`, `pull_request`) + `GitOpsRelay.Polling.Git` (`ls-remote` continuous & `--poll-once` modes).
